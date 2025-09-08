@@ -247,43 +247,14 @@ def start_with(driver: webdriver, context: CustomerProfile, cycles: int = CYCLES
     if context.sms_webhook_token:
         delete_message(context.sms_webhook_token)
 
-    operation_category = "icpplus"
-    operation_param = "tramiteGrupo[1]"
-
-    if context.province == Province.BARCELONA:
-        operation_category = "icpplustieb"
-        operation_param = "tramiteGrupo[0]"
-    elif context.province in [
-        Province.ALICANTE,
-        Province.ILLES_BALEARS,
-        Province.LAS_PALMAS,
-        Province.S_CRUZ_TENERIFE,
-    ]:
-        operation_category = "icpco"
-    elif context.province == Province.MADRID:
-        operation_category = "icpplustiem"
-    elif context.province == Province.MÁLAGA:
-        operation_category = "icpco"
-        operation_param = "tramiteGrupo[0]"
-    elif context.province in [
-        Province.MELILLA,
-        Province.SEVILLA,
-    ]:
-        operation_param = "tramiteGrupo[0]"
-
-    fast_forward_url = "https://icp.administracionelectronica.gob.es/{}/citar?p={}".format(
-        operation_category, context.province
-    )
-    fast_forward_url2 = "https://icp.administracionelectronica.gob.es/{}/acInfo?{}={}".format(
-        operation_category, operation_param, context.operation_code
-    )
+    fast_forward_url = "https://icp.administracionelectronica.gob.es/icpplustieb/citar?p=8"
 
     success = False
     result = False
     for i in range(cycles):
         try:
             logging.info(f"\033[33m[Attempt {i + 1}/{cycles}]\033[0m")
-            result = cycle_cita(driver, context, fast_forward_url, fast_forward_url2)
+            result = cycle_cita(driver, context, fast_forward_url)
         except KeyboardInterrupt:
             raise
         except TimeoutException:
@@ -308,21 +279,14 @@ def toma_huellas_step2(driver: webdriver, context: CustomerProfile):
         WebDriverWait(driver, DELAY).until(EC.presence_of_element_located((By.ID, "txtPaisNac")))
     except TimeoutException:
         logging.error("Timed out waiting for form to load")
-        return None
+        return False
+    
+    driver.find_element(By.ID, "btnCopiar").click()
 
     # Select country
     select = Select(driver.find_element(By.ID, "txtPaisNac"))
     select.select_by_visible_text(context.country)
-
-    # Select doc type
-    if context.doc_type == DocType.PASSPORT:
-        driver.find_element(By.ID, "rdbTipoDocPas").send_keys(Keys.SPACE)
-    elif context.doc_type == DocType.NIE:
-        driver.find_element(By.ID, "rdbTipoDocNie").send_keys(Keys.SPACE)
-
-    # Enter doc number and name
-    element = driver.find_element(By.ID, "txtIdCitado")
-    element.send_keys(context.doc_value, Keys.TAB, context.name)
+    driver.find_element(By.ID, "btnEnviar").send_keys(Keys.ENTER)
 
     return True
 
@@ -768,35 +732,36 @@ def log_backoff(details):
     on_backoff=log_backoff,
     logger=None,
 )
-def initial_page(driver: webdriver, context: CustomerProfile, fast_forward_url, fast_forward_url2):
+def initial_page(driver: webdriver, context: CustomerProfile, fast_forward_url):
     if context.first_load:
         driver.delete_all_cookies()
 
     driver.set_page_load_timeout(300 if context.first_load else 50)
-    # Fix chromedriver 103 bug
-    time.sleep(1)
-    driver.get(fast_forward_url)
-    time.sleep(5)
+    driver.get("https://icp.administracionelectronica.gob.es/icpplus/index.html")
     if context.first_load:
         try:
+            time.sleep(1)
             driver.execute_script("window.localStorage.clear();")
             driver.execute_script("window.sessionStorage.clear();")
         except Exception as e:
             logging.error(e)
             pass
-    driver.get(fast_forward_url2)
-    time.sleep(5)
-
-    resp_text = body_text(driver)
-    if "INTERNET CITA PREVIA" not in resp_text:
-        context.first_load = True
-        raise TimeoutException
-
     context.first_load = False
 
+    # Choose province
+    form = Select(driver.find_element(By.ID, "form"))
+    form.select_by_visible_text("Barcelona")
+    driver.find_element(By.ID, "btnAceptar").click()
 
-def cycle_cita(driver: webdriver, context: CustomerProfile, fast_forward_url, fast_forward_url2):
-    initial_page(driver, context, fast_forward_url, fast_forward_url2)
+    # Choose appointment type (Toma de Huellas)
+    tramite = Select(driver.find_element(By.ID, "tramiteGrupo[0]"))
+    tramite.select_by_value("4010")
+    btn = driver.find_element(By.ID, "btnAceptar")
+    btn.click()
+
+
+def cycle_cita(driver: webdriver, context: CustomerProfile, fast_forward_url):
+    initial_page(driver, context, fast_forward_url)
 
     # 1. Instructions page:
     try:
@@ -805,42 +770,16 @@ def cycle_cita(driver: webdriver, context: CustomerProfile, fast_forward_url, fa
         logging.error("Timed out waiting for Instructions page to load")
         return None
 
-    if os.environ.get("CITA_TEST") and context.operation_code == OperationType.TOMA_HUELLAS:
-        logging.info("Instructions page loaded")
-        return True
+    time.sleep(60)
+    driver.find_element(By.ID, "btnAccesoClave").click()
 
-    driver.find_element(By.ID, "btnEntrar").send_keys(Keys.ENTER)
+    driver.find_element_by_xpath("//button[contains(., 'Access eIdentifier')]").click()
 
-    # 2. Personal info:
+    # 1. Personal info:
     logging.info("[Step 1/6] Personal info")
-    success = False
-    if context.operation_code == OperationType.TOMA_HUELLAS:
-        success = toma_huellas_step2(driver, context)
-    elif context.operation_code == OperationType.RECOGIDA_DE_TARJETA:
-        success = recogida_de_tarjeta_step2(driver, context)
-    elif context.operation_code == OperationType.SOLICITUD_ASILO:
-        success = solicitud_asilo_step2(driver, context)
-    elif context.operation_code == OperationType.BREXIT:
-        success = brexit_step2(driver, context)
-    elif context.operation_code == OperationType.CARTA_INVITACION:
-        success = carta_invitacion_step2(driver, context)
-    elif context.operation_code in [
-        OperationType.CERTIFICADOS_NIE,
-        OperationType.CERTIFICADOS_NIE_NO_COMUN,
-        OperationType.CERTIFICADOS_RESIDENCIA,
-        OperationType.CERTIFICADOS_UE,
-    ]:
-        success = certificados_step2(driver, context)
-    elif context.operation_code == OperationType.AUTORIZACION_DE_REGRESO:
-        success = autorizacion_de_regreso_step2(driver, context)
-    elif context.operation_code == OperationType.ASIGNACION_NIE:
-        success = asignacion_nie_step2(driver, context)
-
+    success = toma_huellas_step2(driver, context)
     if not success:
         return None
-
-    time.sleep(2)
-    driver.find_element(By.ID, "btnEnviar").send_keys(Keys.ENTER)
 
     try:
         WebDriverWait(driver, 7).until(EC.presence_of_element_located((By.ID, "btnConsultar")))
